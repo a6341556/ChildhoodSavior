@@ -1,102 +1,82 @@
 import os
-from pyamf.sol import decode, encode, SOL # 繼承自 dict 的 SOL 類
-from pyamf import util
+import tempfile
+
+from pyamf.sol import decode, encode, SOL
+
 
 class SOLFile:
-    """
-    Local Shared Object (LSO) 檔案的物件導向封裝。
-    處理檔案讀取、數據存儲和寫入。
-    """
+    """保留 AMF 容器與型別，透過路徑修改巢狀欄位。"""
+
     def __init__(self, filepath=None):
-        self.filepath = filepath
+        self.filepath = None
         self.sol_instance = None
         self.data = {}
+        self.encoding = 0
         if filepath:
-            self.load()
+            self.load(filepath)
 
     def load(self, filepath=None):
-        """
-        讀取指定路徑的 .sol 檔案，並將數據解碼到 sol_instance 和 data 字典中。
-        """
-        if filepath:
-            self.filepath = filepath
-            
-        if not self.filepath or not os.path.exists(self.filepath):
-            raise FileNotFoundError(f"找不到檔案: {self.filepath}")
-
-        with open(self.filepath, 'rb') as f:
-            content = f.read()
-
-        # 1. 解碼 (得到 Tuple: sol_name, data_dict)
-        sol_name, data_dict = decode(content)
-        
-        # 2. 封裝成 SOL 實例
-        self.sol_instance = SOL(sol_name)
-        self.sol_instance.update(data_dict)
-        self.data = dict(self.sol_instance) # 儲存一個可讀的副本
-        
+        path = filepath or self.filepath
+        if not path:
+            raise ValueError("請先選擇檔案。")
+        path = os.fspath(path)
+        with open(path, "rb") as source:
+            content = source.read()
+        name, values = decode(content)
+        name_length = int.from_bytes(content[16:18], "big")
+        encoding = content[21 + name_length]
+        instance = SOL(name)
+        instance.update(values)
+        self.filepath = path
+        self.sol_instance = instance
+        self.data = instance
+        self.encoding = encoding
         return self.data
 
     def get_data(self):
-        """回傳所有的 Key-Value 數據字典。"""
         return self.data
 
-    def update_value(self, key, new_value):
-        """
-        更新內存數據，並同時更新 SOL 實例。
-        """
-        if key not in self.data:
-            raise KeyError(f"Key '{key}' 不存在於檔案數據中。")
-        
-        # 保持類型一致性 (UI 處理時可能需要更複雜的轉換)
-        old_value = self.data[key]
-        value_type = type(old_value)
+    def get_value(self, path):
+        value = self.data
+        for key in path:
+            value = value[key]
+        return value
 
+    @staticmethod
+    def is_editable(value):
+        return type(value) in (str, bool, int, float)
+
+    def update_path(self, path, text):
+        if not path:
+            raise ValueError("不能取代根物件。")
+        parent = self.get_value(path[:-1])
+        old = parent[path[-1]]
+        if not self.is_editable(old):
+            raise ValueError("請展開容器以修改內部欄位；此型別只供瀏覽。")
         try:
-            # 嘗試轉換新值到舊值的類型
-            if value_type is int:
-                converted_value = int(new_value)
-            elif value_type is float:
-                converted_value = float(new_value)
+            if type(old) is bool:
+                converted = {"true": True, "false": False, "1": True, "0": False}[text.strip().lower()]
             else:
-                converted_value = new_value
-        except ValueError:
-            raise ValueError(f"無法將 '{new_value}' 轉換為 Key '{key}' 的原始類型 {value_type.__name__}。")
-
-        # 更新內部數據和 SOL 實例
-        self.data[key] = converted_value
-        self.sol_instance[key] = converted_value
-        
+                converted = type(old)(text)
+        except (ValueError, KeyError) as error:
+            raise ValueError(f"請輸入有效的 {type(old).__name__} 值。") from error
+        parent[path[-1]] = converted
         return True
 
+    def update_value(self, key, new_value):
+        return self.update_path((key,), new_value)
+
     def save(self):
-        """
-        將修改後的 SOL 實例編碼並安全地寫入檔案。
-        """
-        if not self.sol_instance:
-            raise ValueError("無數據可儲存，請先載入檔案。")
-
-        # 1. 編碼 (encode(name, values) 回傳 Stream)
-        stream = encode(self.sol_instance.name, self.sol_instance)
-        output_bytes = stream.getvalue() # 取得 bytes
-        
-        # 2. 安全寫入流程 (使用臨時檔案)
-        temp_path = self.filepath + ".tmp"
-        
+        if self.sol_instance is None:
+            raise ValueError("請先載入檔案。")
+        output = encode(self.sol_instance.name, self.sol_instance, encoding=self.encoding)
+        directory = os.path.dirname(os.path.abspath(self.filepath))
+        fd, temporary = tempfile.mkstemp(prefix=".sol-", suffix=".tmp", dir=directory)
         try:
-            # 寫入臨時檔案
-            with open(temp_path, 'wb') as f:
-                f.write(output_bytes)
-                
-            # 替換原檔案
-            if os.path.exists(self.filepath):
-                os.remove(self.filepath)
-            os.rename(temp_path, self.filepath)
-            
-            return True
-
-        except Exception as e:
-            # 失敗時嘗試清除臨時檔案
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
-            raise IOError(f"檔案寫入失敗: {e}")
+            with os.fdopen(fd, "wb") as target:
+                target.write(output.getvalue())
+            os.replace(temporary, self.filepath)
+        finally:
+            if os.path.exists(temporary):
+                os.remove(temporary)
+        return True
