@@ -100,11 +100,58 @@ class TreeTests(unittest.TestCase):
         self.assertEqual(len(self.app.paths), 1)
         self.expand(node)
         self.assertEqual(len(self.app.tree.get_children(node)), 201)
+        more = self.app.tree.get_children(node)[-1]
+        self.assertEqual(self.app.tree.set(more, "value"), "已顯示 200／501 筆")
         self.expand(next(iter(self.app.pages)))
         self.assertEqual(len(self.app.tree.get_children(node)), 401)
         self.expand(next(iter(self.app.pages)))
         self.assertEqual(len(self.app.tree.get_children(node)), 501)
         self.assertEqual(len(self.app.pages), 0)
+
+    def test_numeric_keys_open_distinct_nested_arrays(self):
+        self.show({"items": {1: [10], "1": [20]}})
+        tree = self.app.tree
+        container = tree.get_children()[0]
+        tree.focus(container)
+        tree.event_generate("<<TreeviewOpen>>")
+        tree.item(container, open=True)
+        for node, label, key, value in zip(tree.get_children(container), ("[1]", "'1'"), (1, "1"), (10, 20)):
+            self.assertEqual(tree.item(node, "text"), label)
+            tree.focus(node)
+            tree.event_generate("<<TreeviewOpen>>")
+            leaf, = tree.get_children(node)
+            self.assertEqual(tree.item(leaf, "text"), "[0]")
+            self.assertEqual(self.app.paths[leaf], ("items", key, 0))
+            self.assertEqual(self.app.sol_handler.get_value(self.app.paths[leaf]), value)
+
+    def test_sol_array_with_numeric_name(self):
+        fd, filename = tempfile.mkstemp(suffix=".sol", dir=".")
+        os.close(fd)
+        file = Path(filename)
+        self.addCleanup(file.unlink, missing_ok=True)
+        sparse = MixedArray()
+        sparse[24] = 24
+        for encoding, array in ((0, sparse), (0, list(range(25))), (3, list(range(25)))):
+            with self.subTest(encoding=encoding, container=type(array).__name__):
+                file.write_bytes(encode("test", {"1": array}, encoding=encoding).getvalue())
+                self.app.sol_handler = SOLFile(file)
+                self.app.display_data(self.app.sol_handler.data)
+                tree = self.app.tree
+                name, = tree.get_children()
+                self.assertEqual(tree.item(name, "text"), "1")
+                self.expand(name)
+                leaf = tree.get_children(name)[-1]
+                self.assertEqual(self.app.paths[leaf], ("1", 24))
+                tree.selection_set(leaf)
+                self.app.select_node()
+                self.assertEqual(self.app.path_label["text"], "1[24]")
+                self.app.value_text.delete("1.0", "end")
+                self.app.value_text.insert("1.0", "99")
+                self.assertTrue(self.app.apply_edit())
+                self.app.sol_handler.save()
+                saved = SOLFile(file)
+                self.assertIs(type(saved.data["1"]), type(array))
+                self.assertEqual(saved.data["1"][24], 99)
 
     def test_cycles_stop_but_shared_objects_expand(self):
         child = {"value": 1}

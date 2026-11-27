@@ -139,6 +139,7 @@ class SOLEditorApp:
     def add_page(self, parent, path, value, iterator=None):
         if iterator is None:
             iterator = iter(value.items()) if isinstance(value, dict) else enumerate(value)
+        shown = len(self.tree.get_children(parent))
         ancestors = {id(self.sol_handler.data)}
         ancestor = self.sol_handler.data
         for key in path:
@@ -149,8 +150,15 @@ class SOLEditorApp:
                 key, child = next(iterator)
             except StopIteration:
                 return
-            node = self.tree.insert(parent, "end", text=str(key), values=(self.preview(child), type(child).__name__))
+            label = str(key)
+            if path:
+                if type(key) is int:
+                    label = f"[{key}]"
+                elif isinstance(key, str) and key.isdecimal():
+                    label = repr(key)
+            node = self.tree.insert(parent, "end", text=label, values=(self.preview(child), type(child).__name__))
             self.paths[node] = path + (key,)
+            shown += 1
             if self.is_container(child) and child:
                 if id(child) in ancestors:
                     self.tree.set(node, "value", "循環參照（不再展開）")
@@ -161,7 +169,11 @@ class SOLEditorApp:
             first = next(iterator)
         except StopIteration:
             return
-        more = self.tree.insert(parent, "end", text="展開以顯示更多…")
+        total = len(value)
+        more = self.tree.insert(
+            parent, "end", text=f"展開以顯示第 {shown + 1}–{min(shown + self.PAGE_SIZE, total)} 筆",
+            values=(f"已顯示 {shown}／{total} 筆", ""),
+        )
         self.tree.insert(more, "end", text="下一批")
         self.pages[more] = (parent, path, value, chain((first,), iterator))
 
@@ -178,8 +190,11 @@ class SOLEditorApp:
 
     def load_next_page(self, node, args):
         if self.tree.exists(node):
+            parent = args[0]
+            index = self.tree.index(node)
             self.tree.delete(node)
             self.add_page(*args)
+            self.tree.see(self.tree.get_children(parent)[index])
 
     def select_node(self, event=None):
         selection = self.tree.selection()
@@ -199,7 +214,12 @@ class SOLEditorApp:
         editable = False
         if path is not None:
             value = self.sol_handler.get_value(path)
-            self.path_label.configure(text="根" + "".join(f"[{key!r}]" for key in path))
+            root_name, *child_keys = path
+            if isinstance(root_name, str) and (root_name.isidentifier() or root_name.isdecimal()):
+                label = root_name
+            else:
+                label = f"根[{root_name!r}]"
+            self.path_label.configure(text=label + "".join(f"[{key!r}]" for key in child_keys))
             editable = self.sol_handler.is_editable(value) and not self.busy
             if editable:
                 self.selected = node
